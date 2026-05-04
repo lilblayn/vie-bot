@@ -74,50 +74,60 @@ def sauvegarder_offres_vues(ids):
 
 def scraper_offres():
     offres = []
-    try:
-        api_url = "https://mon-vie-via.businessfrance.fr/api/offres"
-        params = {"sort": 0, "page": 1, "size": 50, "typeVolontariat": "VIE"}
-        r = requests.get(api_url, params=params, headers=HEADERS, timeout=15)
+    seen = set()
 
-        if r.status_code == 200:
-            data = r.json()
-            items = data.get("content", data.get("offres", data.get("items", [])))
-            for item in items:
-                offre_id = str(item.get("id", item.get("offerId", "")))
-                titre = item.get("titre", item.get("title", item.get("intitule", "N/A")))
-                entreprise = item.get("entreprise", item.get("company", item.get("raisonSociale", "N/A")))
-                if isinstance(entreprise, dict):
-                    entreprise = entreprise.get("nom", entreprise.get("name", "N/A"))
-                pays = item.get("pays", item.get("country", item.get("ville", "N/A")))
-                if isinstance(pays, dict):
-                    pays = pays.get("libelle", pays.get("name", "N/A"))
-                lien = f"https://mon-vie-via.businessfrance.fr/offres/{offre_id}"
-                if offre_id and titre:
-                    offres.append({"id": offre_id, "titre": titre, "entreprise": entreprise, "pays": pays, "lien": lien})
-            log.info(f"{len(offres)} offres récupérées via API JSON")
-        else:
-            raise Exception(f"API retourné {r.status_code}")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+
+            page = browser.new_page()
+            page.goto(
+                "https://mon-vie-via.businessfrance.fr/offres/recherche?latest=true",
+                wait_until="networkidle",
+                timeout=60000
+            )
+
+            page.wait_for_timeout(5000)
+
+            liens = page.locator("a").all()
+
+            for lien_element in liens:
+                href = lien_element.get_attribute("href")
+                texte = lien_element.inner_text().strip()
+
+                if not href or "/offres/" not in href:
+                    continue
+
+                lien = href if href.startswith("http") else f"https://mon-vie-via.businessfrance.fr{href}"
+
+                match = re.search(r"/offres/([^/?#]+)", lien)
+                if not match:
+                    continue
+
+                offre_id = match.group(1)
+
+                if offre_id in seen:
+                    continue
+
+                seen.add(offre_id)
+
+                offres.append({
+                    "id": offre_id,
+                    "titre": texte or "Offre VIE",
+                    "entreprise": "N/A",
+                    "pays": "N/A",
+                    "lien": lien,
+                })
+
+            browser.close()
 
     except Exception as e:
-        log.warning(f"API JSON échouée ({e}), tentative scraping HTML...")
-        try:
-            r = requests.get(VIE_URL, headers=HEADERS, timeout=15)
-            soup = BeautifulSoup(r.text, "html.parser")
-            seen = set()
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                m = re.search(r"/offres/(\d+)", href)
-                if m:
-                    offre_id = m.group(1)
-                    if offre_id not in seen:
-                        seen.add(offre_id)
-                        titre = a.get_text(strip=True) or "Offre VIE"
-                        lien = f"https://mon-vie-via.businessfrance.fr/offres/{offre_id}"
-                        offres.append({"id": offre_id, "titre": titre, "entreprise": "N/A", "pays": "N/A", "lien": lien})
-            log.info(f"{len(offres)} offres récupérées via scraping HTML")
-        except Exception as e2:
-            log.error(f"Erreur scraping HTML : {e2}")
+        log.error(f"Erreur Playwright : {e}")
 
+    log.info(f"{len(offres)} offres récupérées via Playwright")
     return offres
 
 # ─── BOUCLE PRINCIPALE ───────────────────────────────────────────────────────
